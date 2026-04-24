@@ -1,0 +1,22 @@
+# Build artifacts
+mdkb
+obj/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local Claude settings (author-specific, not for distribution)
+.claude/settings.local.json
