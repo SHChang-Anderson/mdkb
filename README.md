@@ -54,12 +54,45 @@ mdkb --sync-on
 
 # Open the knowledge browser
 mdkb
-
-# In TUI: press L to load a note into Claude Code
-# In Claude Code: run /mdkb-read for a guided walkthrough
 ```
 
 Press `?` inside the TUI for the full key binding reference.
+
+## First Run — load a note and explore interactively
+
+`install.sh` writes a getting-started note to your knowledge base.
+Use it to learn mdkb from inside Claude Code:
+
+**Step 1 — open the TUI**
+```bash
+mdkb
+```
+
+**Step 2 — mark the getting-started note**
+
+The note appears under the `mdkb / getting-started` topic.
+Navigate to it with `j`/`k`, then press `m` to mark it.
+
+**Step 3 — launch Claude Code with the note as context**
+
+Press `L`. mdkb launches Claude Code with the note injected as
+system prompt context.
+
+**Step 4 — run `/mdkb-read` inside Claude Code**
+
+```
+/mdkb-read
+```
+
+Claude walks you through the note section by section, explains
+each concept, and waits for you to say OK before moving on.
+
+---
+
+That's the core loop. From now on:
+1. Have a conversation with Claude → auto-sync extracts notes
+2. Open `mdkb`, mark relevant notes, press `L`
+3. Run `/mdkb-read` (or just start asking — Claude already has context)
 
 ## CLI Reference
 
