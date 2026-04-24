@@ -1,0 +1,208 @@
+.TH MDKB 1 "2026" "mdkb v0.1.0" "User Commands"
+.SH NAME
+mdkb \- Markdown knowledge base with Claude Code integration
+.SH SYNOPSIS
+.B mdkb
+[\fIOPTIONS\fR] [\fICOMMAND\fR]
+.SH DESCRIPTION
+.B mdkb
+is a fast, vim-like TUI for capturing and retrieving knowledge from
+Claude Code conversations.
+Conversations are automatically extracted into structured Markdown notes,
+searchable via BM25 ranking, and loadable back into Claude as context
+with a single keypress.
+.SH COMMANDS
+.TP
+.I (none)
+Launch interactive TUI mode.
+.TP
+.BI \-q " STR" ", " \-\-query " STR"
+Search the knowledge base for \fISTR\fR using BM25 ranking.
+Outputs results as JSON.
+.TP
+.BI \-\-load " STR"
+Search and print the full content of the top-matching note.
+.TP
+.BI \-i " PATH" ", " \-\-ingest " PATH"
+Import a Claude Code conversation file (JSONL format) into the archive.
+.TP
+.B \-\-pick
+TUI pick mode: press \fBL\fR to select a note and exit, printing its path to stdout.
+.TP
+.B \-\-list
+List recent entries as JSON without launching the TUI.
+.TP
+.B \-\-sync\-on
+Register a Claude Code Stop hook so conversations are automatically
+ingested and extracted into knowledge notes at session end.
+.TP
+.B \-\-sync\-off
+Remove the Stop hook and disable auto-sync.
+.TP
+.B \-\-archive
+Browse the raw conversation archive instead of the knowledge base.
+.TP
+.B \-\-reindex
+Rebuild the in-memory BM25 search index from the knowledge directory.
+.TP
+.BR \-v ", " \-\-version
+Print version and exit.
+.TP
+.BR \-h ", " \-\-help
+Print usage summary and exit.
+.SH OPTIONS
+.TP
+.BI \-l " N" ", " \-\-limit " N"
+Limit search results to \fIN\fR entries (default: 10).
+.TP
+.BI \-p " PATH" ", " \-\-path " PATH"
+Override the knowledge base root directory (default: \fI~/.mdkb\fR).
+.TP
+.BI \-\-title\-weight " N"
+BM25 score multiplier for title matches (default: 10).
+.TP
+.BI \-\-tag\-weight " N"
+BM25 score multiplier for tag matches (default: 5).
+.TP
+.BI \-\-content\-weight " N"
+BM25 score multiplier for content matches (default: 1).
+.SH TUI KEY BINDINGS
+.SS Navigation
+.TP
+.BR j ", " \*(lk
+Move selection down / up.
+.TP
+.BR g ", " G
+Jump to first / last entry.
+.TP
+.B Tab
+Toggle between Knowledge and Archive tabs.
+.SS Search and Filter
+.TP
+.B /
+Enter a search keyword.
+.TP
+.BR r ", " R
+Clear search and show all entries.
+.TP
+.B t
+Filter by Topic (press again to clear).
+.TP
+.B T
+Cycle Type filter: knowledge / code / workflow.
+.TP
+.B i
+Open Inbox Review to triage draft notes.
+.SS Multi-select
+.TP
+.B m
+Toggle mark on the current entry; cursor advances.
+.TP
+.B A
+Mark all visible entries (respects active filter). Press again to unmark all.
+.TP
+.B M
+Clear all marks.
+.SS Actions
+.TP
+.B Enter
+Open the current note in Markdown Reader mode.
+.TP
+.B L
+Launch Claude Code with all marked notes loaded as system-prompt context.
+If a session is suspended, resumes it instead.
+.TP
+.B c
+Start a new Claude Code session in the note's original working directory.
+.TP
+.B R
+Resume a suspended Claude Code session.
+.TP
+.B E
+Edit the title, topic, or tags of the current note inline.
+.TP
+.B Y
+Yank (copy) the current note content to the clipboard.
+.TP
+.B d
+Delete the current note (with confirmation).
+.TP
+.B ?
+Show the in-TUI help screen.
+.TP
+.BR q ", " Q
+Quit mdkb.
+.SH CLAUDE CODE SKILLS
+After installation the following slash commands are available inside Claude Code:
+.TP
+.B /mdkb-read
+Step-by-step guided reading of notes loaded via the \fBL\fR key.
+.TP
+.B /mdkb-workflow
+Execute a loaded workflow or SOP note.
+.TP
+.B /mdkb-workflow-create
+Interactive builder for creating new workflow notes.
+.TP
+.B /mdkb-tidy
+Merge duplicate notes, fix stale code references, and archive low-value notes.
+.TP
+.B /mdkb-sync-on
+Enable the auto-sync Stop hook.
+.TP
+.B /mdkb-sync-off
+Disable the auto-sync Stop hook.
+.SH FILES
+.TP
+.I ~/.mdkb/knowledge/
+Organized knowledge notes, structured as \fIrepo/topic/*.md\fR.
+.TP
+.I ~/.mdkb/knowledge/_inbox/
+Draft notes awaiting triage.
+.TP
+.I ~/.mdkb/knowledge/_archive/
+Archived notes hidden from the main index.
+.TP
+.I ~/.mdkb/archive/
+Raw Claude Code conversation transcripts.
+.TP
+.I ~/.mdkb/.sync-enabled
+Presence of this file indicates auto-sync is active.
+.TP
+.I ~/.claude/skills/mdkb-*/
+Installed Claude Code skill definitions.
+.TP
+.I /usr/local/share/mdkb/scripts/
+Helper scripts used by the sync hook and \fB\-\-sync\-on\fR / \fB\-\-sync\-off\fR.
+.SH NOTE FORMAT
+Knowledge notes are Markdown files with YAML frontmatter:
+.PP
+.RS
+.nf
+\-\-\-
+title: "Note Title"
+type: knowledge
+repo: "my-project"
+topic: "auth"
+tags: [jwt, oauth, type:knowledge]
+status: verified
+updated: 1745000000
+\-\-\-
+.fi
+.RE
+.PP
+Valid \fBtype\fR values are \fBknowledge\fR, \fBcode\fR, and \fBworkflow\fR.
+.SH EXAMPLES
+.TP
+Search for notes about authentication:
+.B mdkb \-q "JWT auth" \-l 5
+.TP
+Enable auto-sync and launch the TUI:
+.B mdkb \-\-sync\-on && mdkb
+.TP
+Rebuild the index after manually adding notes:
+.B mdkb \-\-reindex
+.SH SEE ALSO
+.BR claude (1)
+.SH AUTHORS
+Anderson Chang
