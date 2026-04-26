@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <limits.h>
 #include "mdkb.h"
 
 /* inotify-based auto-refresh (Linux only) */
@@ -3496,6 +3497,49 @@ static int run_child(const char *const argv[], const char *cwd) {
     return -1;
 }
 
+/* Find the original working directory for a session by reading its JSONL file.
+ * Searches ~/.claude/projects/ for SESSION_ID.jsonl and extracts the "cwd" field
+ * from the first user message. Returns a malloc'd string or NULL. */
+static char *find_session_cwd(const char *session_id) {
+    const char *home = getenv("HOME");
+    if (!home || !session_id || !session_id[0]) return NULL;
+
+    char projects_dir[PATH_MAX];
+    snprintf(projects_dir, sizeof(projects_dir), "%s/.claude/projects", home);
+
+    DIR *d = opendir(projects_dir);
+    if (!d) return NULL;
+
+    char *result = NULL;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+
+        char jsonl_path[PATH_MAX];
+        snprintf(jsonl_path, sizeof(jsonl_path), "%s/%s/%s.jsonl",
+                 projects_dir, ent->d_name, session_id);
+
+        FILE *fp = fopen(jsonl_path, "r");
+        if (!fp) continue;
+
+        /* Scan lines for first occurrence of "cwd":"..." */
+        char line[4096];
+        while (fgets(line, sizeof(line), fp)) {
+            char *p = strstr(line, "\"cwd\":\"");
+            if (!p) continue;
+            p += 7; /* skip "cwd":"  */
+            char *end = strchr(p, '"');
+            if (!end) continue;
+            result = kb_strndup(p, (size_t)(end - p));
+            break;
+        }
+        fclose(fp);
+        if (result) break;
+    }
+    closedir(d);
+    return result;
+}
+
 /* Launch Claude Code as a child process.
  * If session_id is non-NULL, resumes that session (falls back to context load on failure).
  * If context_path is non-NULL, used for fallback context loading.
@@ -4424,7 +4468,9 @@ static void handle_key(int key) {
             }
             if (lentry) {
                 if (lentry->session_id && lentry->session_id[0]) {
-                    launch_claude(lentry->session_id, NULL);
+                    char *sid_cwd = find_session_cwd(lentry->session_id);
+                    launch_claude(lentry->session_id, sid_cwd);
+                    free(sid_cwd);
                     refresh_display();
                 } else {
                     launch_claude(NULL, NULL);
