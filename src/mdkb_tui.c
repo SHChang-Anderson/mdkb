@@ -911,6 +911,18 @@ static char *do_type_filter_popup(void) {
 }
 
 /* Comparison for qsort of strings */
+static int cmp_search_result_by_time_desc(const void *a, const void *b) {
+    const SearchResult *ra = (const SearchResult *)a;
+    const SearchResult *rb = (const SearchResult *)b;
+    KB_Entry *ea = mdkb_index_get_entry(g_tui.index, ra->entry_id);
+    KB_Entry *eb = mdkb_index_get_entry(g_tui.index, rb->entry_id);
+    time_t ta = ea ? ea->timestamp : 0;
+    time_t tb = eb ? eb->timestamp : 0;
+    if (tb > ta) return 1;
+    if (tb < ta) return -1;
+    return 0;
+}
+
 static int cmp_strings(const void *a, const void *b) {
     return strcmp(*(const char **)a, *(const char **)b);
 }
@@ -3402,6 +3414,9 @@ static void do_search(void) {
         /* New search */
         g_tui.search_query = kb_strdup(query);
         g_tui.results = mdkb_search(g_tui.index, query);
+        if (g_tui.archive_mode && g_tui.results && g_tui.results->count > 1)
+            qsort(g_tui.results->results, g_tui.results->count,
+                  sizeof(SearchResult), cmp_search_result_by_time_desc);
         g_tui.selected = 0;
         g_tui.offset = 0;
         g_tui.top_offset = 0;
