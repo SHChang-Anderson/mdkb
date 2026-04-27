@@ -314,6 +314,10 @@ typedef struct {
     int *cached_match_lines;         /* array of matching line numbers */
     int cached_match_count;          /* number of cached match lines */
     ReaderState reader;
+    /* Pinned sessions (archive mode) */
+    char **pinned_ids;               /* array of pinned session_id strings */
+    size_t pinned_count;
+    size_t pinned_capacity;
 } TUI_State;
 
 static TUI_State g_tui = {0};
@@ -335,6 +339,7 @@ static void yank_to_clipboard(const char *tmp_path);
 static KB_Index *load_index_for_root(const char *root);
 static void tui_switch_to_index(KB_Index *new_index, const char *new_root);
 static void invalidate_filter_cache(void);
+static int is_pinned(const char *session_id);
 static size_t effective_count(void);
 static KB_Entry *effective_entry_at(int idx);
 
@@ -707,22 +712,43 @@ static int entry_matches_filters(KB_Entry *e) {
 /* Rebuild the filtered entry index cache */
 static void rebuild_filter_cache(void) {
     size_t base = g_tui.results ? g_tui.results->count : g_tui.index->entry_count;
-    /* No filter active: no cache needed */
-    if (!g_tui.topic_filter && !g_tui.type_filter && g_tui.tag_filter_count == 0) {
+    bool has_filters = g_tui.topic_filter || g_tui.type_filter || g_tui.tag_filter_count > 0;
+    bool has_pins = g_tui.archive_mode && g_tui.pinned_count > 0;
+
+    if (!has_filters && !has_pins) {
         free(g_tui.filtered_indices);
         g_tui.filtered_indices = NULL;
         g_tui.filtered_count = base;
         g_tui.filter_cache_valid = true;
         return;
     }
-    /* Rebuild filtered list */
+
     free(g_tui.filtered_indices);
     g_tui.filtered_indices = kb_malloc(base * sizeof(int));
     g_tui.filtered_count = 0;
-    for (size_t i = 0; i < base; i++) {
-        KB_Entry *e = raw_entry_at((int)i);
-        if (entry_matches_filters(e)) {
-            g_tui.filtered_indices[g_tui.filtered_count++] = (int)i;
+
+    if (has_pins) {
+        /* First pass: pinned entries */
+        for (size_t i = 0; i < base; i++) {
+            KB_Entry *e = raw_entry_at((int)i);
+            if (!e) continue;
+            if (has_filters && !entry_matches_filters(e)) continue;
+            if (e->session_id && is_pinned(e->session_id))
+                g_tui.filtered_indices[g_tui.filtered_count++] = (int)i;
+        }
+        /* Second pass: non-pinned entries */
+        for (size_t i = 0; i < base; i++) {
+            KB_Entry *e = raw_entry_at((int)i);
+            if (!e) continue;
+            if (has_filters && !entry_matches_filters(e)) continue;
+            if (!e->session_id || !is_pinned(e->session_id))
+                g_tui.filtered_indices[g_tui.filtered_count++] = (int)i;
+        }
+    } else {
+        for (size_t i = 0; i < base; i++) {
+            KB_Entry *e = raw_entry_at((int)i);
+            if (entry_matches_filters(e))
+                g_tui.filtered_indices[g_tui.filtered_count++] = (int)i;
         }
     }
     g_tui.filter_cache_valid = true;
@@ -1828,6 +1854,15 @@ static void draw_left_pane(void) {
 
         /* Clear the row first */
         mvhline(y, 1, ' ', g_tui.left_width - 1);
+
+        /* Draw pin indicator (archive mode) */
+        if (archive_mode && entry->session_id && is_pinned(entry->session_id)) {
+            if (is_selected) attroff(COLOR_PAIR(CP_HIGHLIGHT));
+            attron(COLOR_PAIR(CP_QUOTE) | A_BOLD);
+            mvprintw(y, 1, "★");
+            attroff(COLOR_PAIR(CP_QUOTE) | A_BOLD);
+            if (is_selected) attron(COLOR_PAIR(CP_HIGHLIGHT));
+        }
 
         /* Draw mark indicator for multi-select */
         uint64_t eid = entry->id;
@@ -3497,6 +3532,76 @@ static int run_child(const char *const argv[], const char *cwd) {
     return -1;
 }
 
+/* ============================================================================
+ * Pin management — archive mode persistent pinning via ~/.mdkb/pinned.txt
+ * ============================================================================ */
+
+static char *pinned_file_path(void) {
+    const char *home = getenv("HOME");
+    if (!home) return NULL;
+    char buf[PATH_MAX];
+    snprintf(buf, sizeof(buf), "%s/.mdkb/pinned.txt", home);
+    return kb_strdup(buf);
+}
+
+static void load_pinned(void) {
+    char *path = pinned_file_path();
+    if (!path) return;
+    FILE *fp = fopen(path, "r");
+    free(path);
+    if (!fp) return;
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+        if (len == 0) continue;
+        if (g_tui.pinned_count >= g_tui.pinned_capacity) {
+            g_tui.pinned_capacity = g_tui.pinned_capacity ? g_tui.pinned_capacity * 2 : 8;
+            g_tui.pinned_ids = realloc(g_tui.pinned_ids, g_tui.pinned_capacity * sizeof(char *));
+        }
+        g_tui.pinned_ids[g_tui.pinned_count++] = kb_strdup(line);
+    }
+    fclose(fp);
+}
+
+static void save_pinned(void) {
+    char *path = pinned_file_path();
+    if (!path) return;
+    FILE *fp = fopen(path, "w");
+    free(path);
+    if (!fp) return;
+    for (size_t i = 0; i < g_tui.pinned_count; i++)
+        fprintf(fp, "%s\n", g_tui.pinned_ids[i]);
+    fclose(fp);
+}
+
+static int is_pinned(const char *session_id) {
+    if (!session_id) return 0;
+    for (size_t i = 0; i < g_tui.pinned_count; i++)
+        if (strcmp(g_tui.pinned_ids[i], session_id) == 0) return 1;
+    return 0;
+}
+
+static void toggle_pin(const char *session_id) {
+    if (!session_id || !session_id[0]) return;
+    for (size_t i = 0; i < g_tui.pinned_count; i++) {
+        if (strcmp(g_tui.pinned_ids[i], session_id) == 0) {
+            free(g_tui.pinned_ids[i]);
+            g_tui.pinned_ids[i] = g_tui.pinned_ids[--g_tui.pinned_count];
+            save_pinned();
+            invalidate_filter_cache();
+            return;
+        }
+    }
+    if (g_tui.pinned_count >= g_tui.pinned_capacity) {
+        g_tui.pinned_capacity = g_tui.pinned_capacity ? g_tui.pinned_capacity * 2 : 8;
+        g_tui.pinned_ids = realloc(g_tui.pinned_ids, g_tui.pinned_capacity * sizeof(char *));
+    }
+    g_tui.pinned_ids[g_tui.pinned_count++] = kb_strdup(session_id);
+    save_pinned();
+    invalidate_filter_cache();
+}
+
 /* Find the original working directory for a session by reading its JSONL file.
  * Searches ~/.claude/projects/ for SESSION_ID.jsonl and extracts the "cwd" field
  * from the first user message. Returns a malloc'd string or NULL. */
@@ -4480,6 +4585,20 @@ static void handle_key(int key) {
             break;
         }
 
+
+        case 'p': {
+            /* Toggle pin on selected archive entry */
+            if (g_tui.archive_mode) {
+                KB_Entry *pentry = NULL;
+                if (g_tui.selected >= 0 && (size_t)g_tui.selected < count)
+                    pentry = effective_entry_at(g_tui.selected);
+                if (pentry && pentry->session_id && pentry->session_id[0]) {
+                    toggle_pin(pentry->session_id);
+                    refresh_display();
+                }
+            }
+            break;
+        }
 
         case 'd': {
             /* Delete selected note */
@@ -5837,6 +5956,7 @@ int mdkb_tui_run(KB_Index *index, const char *mdkb_root) {
             g_tui.knowledge_root = kb_path_join(home, ".mdkb/knowledge");
         }
     }
+    load_pinned();
     /* The initial index is knowledge; archive is lazy-loaded on first Tab */
     g_tui.knowledge_index = index;
     g_tui.knowledge_marked = g_tui.marked;
