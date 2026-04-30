@@ -3426,6 +3426,7 @@ static void do_search(void) {
     /* Enable cursor for input */
     curs_set(1);
     echo();
+    timeout(-1);  /* block until input — main loop runs timeout(500) which breaks getnstr */
 
     int max_y, unused_x;
     getmaxyx(stdscr, max_y, unused_x);
@@ -3435,6 +3436,7 @@ static void do_search(void) {
     mvprintw(max_y - 1, 1, "Search: ");
     getnstr(query, sizeof(query) - 1);
 
+    timeout(500);  /* restore polling interval */
     noecho();
     curs_set(0);
 
