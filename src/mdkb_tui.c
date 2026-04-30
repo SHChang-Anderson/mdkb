@@ -1077,10 +1077,10 @@ static char *do_topic_filter_popup(void) {
 
     while (1) {
         /* Recalculate popup height based on filtered count + search bar */
-        int popup_h = (int)fcount + 6;  /* border + title + separator + search + items + border */
+        int popup_h = (int)fcount + 7;  /* border + title + sep + search + sep + items + hint + border */
         if (popup_h > max_y - 4) popup_h = max_y - 4;
-        if (popup_h < 7) popup_h = 7;
-        int visible = popup_h - 6;  /* rows available for topic items */
+        if (popup_h < 8) popup_h = 8;
+        int visible = popup_h - 7;  /* rows available for topic items */
 
         int start_y = (max_y - popup_h) / 2;
         int start_x = (max_x - popup_w) / 2;
@@ -1156,18 +1156,45 @@ static char *do_topic_filter_popup(void) {
         }
         attroff(COLOR_PAIR(CP_POPUP));
 
+        /* Hint row above bottom border */
+        attron(A_DIM | COLOR_PAIR(CP_POPUP));
+        mvhline(start_y + popup_h - 2, start_x + 1, ' ', popup_w - 2);
+        mvprintw(start_y + popup_h - 2, start_x + 2, "↑↓:move  Enter:select  Esc:cancel");
+        attroff(A_DIM | COLOR_PAIR(CP_POPUP));
+
+        /* Show cursor in filter bar; nav_mode state kept for internal use only */
+        curs_set(1);
+        move(start_y + 3, start_x + 4 + filter_len);
         refresh();
 
         int key = getch();
+
+#define TOPIC_REBUILD_FILTER() do { \
+    fcount = 0; filtered[fcount++] = -1; \
+    for (size_t _i = 0; _i < topic_count; _i++) { \
+        if (filter_len == 0) { filtered[fcount++] = (int)_i; continue; } \
+        const char *_hay = topics[_i]; size_t _hlen = strlen(_hay); \
+        size_t _flen = (size_t)filter_len; int _found = 0; \
+        for (size_t _h = 0; _h + _flen <= _hlen && !_found; _h++) { \
+            int _ok = 1; \
+            for (size_t _f = 0; _f < _flen; _f++) { \
+                if (tolower((unsigned char)_hay[_h+_f]) != tolower((unsigned char)filter[_f])) \
+                    { _ok = 0; break; } \
+            } \
+            if (_ok) _found = 1; \
+        } \
+        if (_found) filtered[fcount++] = (int)_i; \
+    } \
+    sel = 0; scroll = 0; \
+} while(0)
+
         switch (key) {
-            case 'j':
             case KEY_DOWN:
                 if (fcount > 0 && sel < (int)fcount - 1) {
                     sel++;
                     if (sel >= scroll + visible) scroll++;
                 }
                 break;
-            case 'k':
             case KEY_UP:
                 if (sel > 0) {
                     sel--;
@@ -1211,72 +1238,26 @@ static char *do_topic_filter_popup(void) {
                     }
                 }
                 goto topic_done;
-            case 27:   /* Escape */
+            case 27:
             case CTRL('c'):
                 goto topic_done;
             case KEY_BACKSPACE:
             case 127:
             case 8:
-                /* Delete last char from filter */
                 if (filter_len > 0) {
                     filter[--filter_len] = '\0';
-                    /* Rebuild filtered list — always include "New..." */
-                    fcount = 0;
-                    filtered[fcount++] = -1;
-                    for (size_t i = 0; i < topic_count; i++) {
-                        if (filter_len == 0) {
-                            filtered[fcount++] = (int)i;
-                        } else {
-                            /* Case-insensitive substring match */
-                            const char *hay = topics[i];
-                            size_t hlen = strlen(hay);
-                            size_t flen = (size_t)filter_len;
-                            int found = 0;
-                            for (size_t h = 0; h + flen <= hlen; h++) {
-                                int ok = 1;
-                                for (size_t f = 0; f < flen; f++) {
-                                    if (tolower((unsigned char)hay[h+f]) != tolower((unsigned char)filter[f])) {
-                                        ok = 0; break;
-                                    }
-                                }
-                                if (ok) { found = 1; break; }
-                            }
-                            if (found) filtered[fcount++] = (int)i;
-                        }
-                    }
-                    sel = 0;
-                    scroll = 0;
+                    TOPIC_REBUILD_FILTER();
                 }
                 break;
             default:
-                /* Printable characters → append to filter */
                 if (key >= 32 && key < 127 && filter_len < (int)sizeof(filter) - 1) {
                     filter[filter_len++] = (char)key;
                     filter[filter_len] = '\0';
-                    /* Rebuild filtered list — always include "New..." */
-                    fcount = 0;
-                    filtered[fcount++] = -1;
-                    size_t flen = (size_t)filter_len;
-                    for (size_t i = 0; i < topic_count; i++) {
-                        const char *hay = topics[i];
-                        size_t hlen = strlen(hay);
-                        int found = 0;
-                        for (size_t h = 0; h + flen <= hlen; h++) {
-                            int ok = 1;
-                            for (size_t f = 0; f < flen; f++) {
-                                if (tolower((unsigned char)hay[h+f]) != tolower((unsigned char)filter[f])) {
-                                    ok = 0; break;
-                                }
-                            }
-                            if (ok) { found = 1; break; }
-                        }
-                        if (found) filtered[fcount++] = (int)i;
-                    }
-                    sel = 0;
-                    scroll = 0;
+                    TOPIC_REBUILD_FILTER();
                 }
                 break;
         }
+#undef TOPIC_REBUILD_FILTER
     }
 
 topic_done:
@@ -1318,10 +1299,10 @@ static char *do_tag_select_popup(void) {
     char *result = NULL;
 
     while (1) {
-        int popup_h = (int)fcount + 6;
+        int popup_h = (int)fcount + 7;
         if (popup_h > max_y - 4) popup_h = max_y - 4;
-        if (popup_h < 7) popup_h = 7;
-        int visible = popup_h - 6;
+        if (popup_h < 8) popup_h = 8;
+        int visible = popup_h - 7;
 
         int start_y = (max_y - popup_h) / 2;
         int start_x = (max_x - popup_w) / 2;
@@ -1396,18 +1377,44 @@ static char *do_tag_select_popup(void) {
             }
         }
 
+        /* Hint row above bottom border */
+        attron(A_DIM | COLOR_PAIR(CP_POPUP));
+        mvhline(start_y + popup_h - 2, start_x + 1, ' ', popup_w - 2);
+        mvprintw(start_y + popup_h - 2, start_x + 2, "↑↓:move  Enter:select  Esc:cancel");
+        attroff(A_DIM | COLOR_PAIR(CP_POPUP));
+
+        curs_set(1);
+        move(start_y + 3, start_x + 4 + filter_len);
         refresh();
 
         int key = getch();
+
+#define TAG_REBUILD_FILTER() do { \
+    fcount = 0; filtered[fcount++] = -1; \
+    for (size_t _i = 0; _i < tag_count; _i++) { \
+        if (filter_len == 0) { filtered[fcount++] = (int)_i; continue; } \
+        const char *_hay = tags[_i]; size_t _hlen = strlen(_hay); \
+        size_t _flen = (size_t)filter_len; int _found = 0; \
+        for (size_t _h = 0; _h + _flen <= _hlen && !_found; _h++) { \
+            int _ok = 1; \
+            for (size_t _f = 0; _f < _flen; _f++) { \
+                if (tolower((unsigned char)_hay[_h+_f]) != tolower((unsigned char)filter[_f])) \
+                    { _ok = 0; break; } \
+            } \
+            if (_ok) _found = 1; \
+        } \
+        if (_found) filtered[fcount++] = (int)_i; \
+    } \
+    sel = 0; scroll = 0; \
+} while(0)
+
         switch (key) {
-            case 'j':
             case KEY_DOWN:
                 if (fcount > 0 && sel < (int)fcount - 1) {
                     sel++;
                     if (sel >= scroll + visible) scroll++;
                 }
                 break;
-            case 'k':
             case KEY_UP:
                 if (sel > 0) {
                     sel--;
@@ -1451,69 +1458,26 @@ static char *do_tag_select_popup(void) {
                     }
                 }
                 goto tag_select_done;
-            case 27:   /* Escape */
+            case 27:
             case CTRL('c'):
                 goto tag_select_done;
             case KEY_BACKSPACE:
             case 127:
             case 8:
-                /* Delete last char from filter */
                 if (filter_len > 0) {
                     filter[--filter_len] = '\0';
-                    fcount = 0;
-                    filtered[fcount++] = -1;
-                    for (size_t i = 0; i < tag_count; i++) {
-                        if (filter_len == 0) {
-                            filtered[fcount++] = (int)i;
-                        } else {
-                            const char *hay = tags[i];
-                            size_t hlen = strlen(hay);
-                            size_t flen = (size_t)filter_len;
-                            int found = 0;
-                            for (size_t h = 0; h + flen <= hlen; h++) {
-                                int ok = 1;
-                                for (size_t f = 0; f < flen; f++) {
-                                    if (tolower((unsigned char)hay[h+f]) != tolower((unsigned char)filter[f])) {
-                                        ok = 0; break;
-                                    }
-                                }
-                                if (ok) { found = 1; break; }
-                            }
-                            if (found) filtered[fcount++] = (int)i;
-                        }
-                    }
-                    sel = 0;
-                    scroll = 0;
+                    TAG_REBUILD_FILTER();
                 }
                 break;
             default:
-                /* Printable characters → append to filter */
                 if (key >= 32 && key < 127 && filter_len < (int)sizeof(filter) - 1) {
                     filter[filter_len++] = (char)key;
                     filter[filter_len] = '\0';
-                    fcount = 0;
-                    filtered[fcount++] = -1;
-                    size_t flen = (size_t)filter_len;
-                    for (size_t i = 0; i < tag_count; i++) {
-                        const char *hay = tags[i];
-                        size_t hlen = strlen(hay);
-                        int found = 0;
-                        for (size_t h = 0; h + flen <= hlen; h++) {
-                            int ok = 1;
-                            for (size_t f = 0; f < flen; f++) {
-                                if (tolower((unsigned char)hay[h+f]) != tolower((unsigned char)filter[f])) {
-                                    ok = 0; break;
-                                }
-                            }
-                            if (ok) { found = 1; break; }
-                        }
-                        if (found) filtered[fcount++] = (int)i;
-                    }
-                    sel = 0;
-                    scroll = 0;
+                    TAG_REBUILD_FILTER();
                 }
                 break;
         }
+#undef TAG_REBUILD_FILTER
     }
 
 tag_select_done:
@@ -1647,20 +1611,20 @@ static void do_tag_filter_popup(void) {
         attron(A_DIM);
         ui_hline(start_y + popup_h - 2, start_x + 1, popup_w - 2);
         mvprintw(start_y + popup_h - 1, start_x + 2,
-                 "Space:toggle  Enter:apply  c:clear  Esc:cancel");
+                 "↑↓:move  Space:toggle  Enter:apply  c:clear  Esc:cancel");
         attroff(A_DIM);
 
         refresh();
 
         int key = getch();
         switch (key) {
-            case 'j': case KEY_DOWN:
+            case KEY_DOWN:
                 if (fcount > 0 && sel < (int)fcount - 1) {
                     sel++;
                     if (sel >= scroll + visible) scroll++;
                 }
                 break;
-            case 'k': case KEY_UP:
+            case KEY_UP:
                 if (sel > 0) {
                     sel--;
                     if (sel < scroll) scroll--;
