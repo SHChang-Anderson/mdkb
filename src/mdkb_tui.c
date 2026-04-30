@@ -325,6 +325,7 @@ static TUI_State g_tui = {0};
 /* Claude Code child process tracking */
 static pid_t g_claude_pid = 0;
 static char g_claude_session_id[64] = "";
+static char g_claude_cwd[4096] = "";
 
 /* /dev/tty handles for running inside piped environments (e.g. Claude Code) */
 static FILE *g_tty_in = NULL;
@@ -555,9 +556,9 @@ static void draw_header(void) {
     if (g_claude_pid > 0) {
         attron(COLOR_PAIR(CP_TAG));
         if (g_claude_session_id[0])
-            printw(" | [Claude %.8s.. - R]", g_claude_session_id);
+            printw(" | [Claude %.8s.. - R/C]", g_claude_session_id);
         else
-            printw(" | [Claude paused - R]");
+            printw(" | [Claude paused - R/C]");
         attroff(COLOR_PAIR(CP_TAG));
         attron(A_BOLD | COLOR_PAIR(CP_HEADER));
     }
@@ -3693,11 +3694,26 @@ static void launch_claude(const char *session_id, const char *cwd) {
         /* rc == -1: resume failed — fall through to context load */
     }
 
+    /* Generate session UUID for steps 2/3 so C key can find the JSONL later */
+    {
+        FILE *fuuid = fopen("/proc/sys/kernel/random/uuid", "r");
+        if (fuuid) {
+            if (fgets(g_claude_session_id, sizeof(g_claude_session_id), fuuid))
+                g_claude_session_id[strcspn(g_claude_session_id, "\n")] = '\0';
+            fclose(fuuid);
+        }
+    }
+    if (cwd && cwd[0])
+        snprintf(g_claude_cwd, sizeof(g_claude_cwd), "%s", cwd);
+    else
+        getcwd(g_claude_cwd, sizeof(g_claude_cwd));
+
     /* Step 2: resume failed — start claude with note as system-level guidance.
      * Uses --append-system-prompt-file to let claude read the file directly,
      * keeping built-in capabilities while injecting note as background knowledge. */
     if (context_path) {
         const char *argv[] = {"claude", "--model", "sonnet", "--permission-mode", "auto",
+                              "--session-id", g_claude_session_id,
                               "--append-system-prompt-file", context_path, NULL};
         int rc2 = run_child(argv, cwd);
         free(context_path);
@@ -3707,7 +3723,8 @@ static void launch_claude(const char *session_id, const char *cwd) {
 
     /* Step 3: no context — just start blank claude */
     {
-        const char *argv[] = {"claude", "--model", "sonnet", "--permission-mode", "auto", NULL};
+        const char *argv[] = {"claude", "--model", "sonnet", "--permission-mode", "auto",
+                              "--session-id", g_claude_session_id, NULL};
         int rc3 = run_child(argv, cwd);
         restore_after_claude(rc3 != 1);
     }
@@ -3961,6 +3978,271 @@ static char *build_marked_files_prompt(bool mark_new) {
     return prompt;
 }
 
+/* ============================================================================
+ * C key: fresh session with context from last session
+ * ============================================================================ */
+
+/* Read last n human+assistant exchanges from the session JSONL.
+ * Returns malloc'd string or NULL. Simple line-by-line JSON extraction,
+ * no full JSON parser — relies on predictable JSONL structure. */
+static char *read_last_exchanges(const char *session_id, const char *cwd, int n) {
+    if (!session_id || !session_id[0] || !cwd || !cwd[0]) return NULL;
+
+    /* Build path: ~/.claude/projects/{cwd-with-slashes-as-dashes}/{session_id}.jsonl */
+    char encoded_cwd[4096];
+    size_t j = 0;
+    for (size_t i = 0; cwd[i] && j < sizeof(encoded_cwd) - 1; i++)
+        encoded_cwd[j++] = (cwd[i] == '/') ? '-' : cwd[i];
+    encoded_cwd[j] = '\0';
+
+    char home[256];
+    const char *h = getenv("HOME");
+    snprintf(home, sizeof(home), "%s", h ? h : "/root");
+
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/.claude/projects/%s/%s.jsonl",
+             home, encoded_cwd, session_id);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+
+    /* Collect all lines, keep last 2*n that are human or assistant */
+    typedef struct { char *text; int is_human; } Msg;
+    int cap = 256;
+    Msg *msgs = malloc(cap * sizeof(Msg));
+    if (!msgs) { fclose(f); return NULL; }
+    int count = 0;
+
+    char line[65536];
+    while (fgets(line, sizeof(line), f)) {
+        int is_human = (strstr(line, "\"type\":\"user\"") ||
+                        strstr(line, "\"type\": \"user\"")) ? 1 : 0;
+        int is_asst  = (strstr(line, "\"type\":\"assistant\"") ||
+                        strstr(line, "\"type\": \"assistant\"")) ? 1 : 0;
+        if (!is_human && !is_asst) continue;
+
+        /* Extract text content with simple heuristic:
+         * user: "content": "..." (string) or first "text": "..." in content array
+         * assistant: first "text": "..." in content array */
+        const char *text_start = NULL;
+        size_t text_len = 0;
+
+        /* Look for "text": "..." */
+        const char *p = strstr(line, "\"text\":");
+        if (!p) p = strstr(line, "\"content\":");
+        if (p) {
+            p = strchr(p, '"');          /* skip key */
+            if (p) p = strchr(p + 1, '"'); /* skip closing quote of key */
+            if (p) p++;                    /* skip colon+space to value */
+            /* skip whitespace and opening quote */
+            while (p && (*p == ' ' || *p == ':')) p++;
+            if (p && *p == '[') {
+                /* array — find first "text" value */
+                p = strstr(p, "\"text\":");
+                if (p) {
+                    p += 7;
+                    while (*p == ' ') p++;
+                }
+            }
+            if (p && *p == '"') {
+                p++;
+                text_start = p;
+                /* find end of string (unescaped quote) */
+                const char *q = p;
+                while (*q && !(*q == '"' && (q == p || *(q-1) != '\\'))) q++;
+                text_len = (size_t)(q - p);
+            }
+        }
+
+        if (!text_start || text_len == 0) continue;
+
+        /* Truncate at 600 chars */
+        size_t keep = text_len > 600 ? 600 : text_len;
+        char *copy = malloc(keep + 4);
+        if (!copy) continue;
+        memcpy(copy, text_start, keep);
+        if (text_len > 600) { copy[keep] = '.'; copy[keep+1] = '.'; copy[keep+2] = '.'; copy[keep+3] = '\0'; }
+        else copy[keep] = '\0';
+
+        if (count == cap) {
+            cap *= 2;
+            Msg *tmp = realloc(msgs, cap * sizeof(Msg));
+            if (!tmp) { free(copy); break; }
+            msgs = tmp;
+        }
+        msgs[count].text     = copy;
+        msgs[count].is_human = is_human;
+        count++;
+    }
+    fclose(f);
+
+    /* Take last 2*n */
+    int start = count > 2 * n ? count - 2 * n : 0;
+
+    /* Build output string */
+    size_t bufsz = 256;
+    for (int i = start; i < count; i++) bufsz += strlen(msgs[i].text) + 32;
+    char *out = malloc(bufsz);
+    if (!out) { for (int i = 0; i < count; i++) free(msgs[i].text); free(msgs); return NULL; }
+
+    size_t pos = 0;
+    for (int i = start; i < count; i++) {
+        pos += snprintf(out + pos, bufsz - pos, "**%s**: %s\n\n",
+                        msgs[i].is_human ? "Human" : "Claude", msgs[i].text);
+    }
+    for (int i = 0; i < count; i++) free(msgs[i].text);
+    free(msgs);
+    if (pos == 0) { free(out); return NULL; }
+    return out;
+}
+
+/* Find knowledge notes tagged with session_id. Returns malloc'd string
+ * with "### Title\n<path>\n\n" blocks, or NULL. */
+static char *find_session_notes(const char *session_id) {
+    if (!session_id || !session_id[0]) return NULL;
+
+    char home[256];
+    const char *h = getenv("HOME");
+    snprintf(home, sizeof(home), "%s", h ? h : "/root");
+
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "grep -rl 'session: \"%s\"' \"%s/.mdkb/knowledge\" 2>/dev/null",
+             session_id, home);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return NULL;
+
+    size_t bufsz = 4096;
+    char *out = malloc(bufsz);
+    if (!out) { pclose(fp); return NULL; }
+    size_t pos = 0;
+    int found = 0;
+
+    char fpath[4096];
+    while (fgets(fpath, sizeof(fpath), fp)) {
+        fpath[strcspn(fpath, "\n")] = '\0';
+        if (!fpath[0]) continue;
+
+        /* Extract title from frontmatter */
+        char title[256] = "";
+        FILE *nf = fopen(fpath, "r");
+        if (nf) {
+            char buf[512];
+            while (fgets(buf, sizeof(buf), nf)) {
+                if (strncmp(buf, "title:", 6) == 0) {
+                    char *t = buf + 6;
+                    while (*t == ' ' || *t == '"') t++;
+                    char *end = t + strlen(t) - 1;
+                    while (end > t && (*end == '\n' || *end == '"' || *end == '\r')) end--;
+                    *(end + 1) = '\0';
+                    snprintf(title, sizeof(title), "%s", t);
+                    break;
+                }
+                if (strcmp(buf, "---\n") == 0 && title[0]) break;
+            }
+            fclose(nf);
+        }
+        if (!title[0]) {
+            /* fallback: basename */
+            const char *base = strrchr(fpath, '/');
+            snprintf(title, sizeof(title), "%s", base ? base + 1 : fpath);
+        }
+
+        size_t needed = strlen(fpath) + strlen(title) + 32;
+        if (pos + needed >= bufsz) {
+            bufsz = (pos + needed) * 2;
+            char *tmp = realloc(out, bufsz);
+            if (!tmp) break;
+            out = tmp;
+        }
+        pos += snprintf(out + pos, bufsz - pos, "- [%s](%s)\n", title, fpath);
+        found++;
+    }
+    pclose(fp);
+
+    if (!found) { free(out); return NULL; }
+    out[pos] = '\0';
+    return out;
+}
+
+/* Kill suspended Claude, then launch a fresh session carrying:
+ *   1. currently marked files (paths + titles, read on demand)
+ *   2. session-specific notes found via session ID grep
+ *   3. last few conversation exchanges inline */
+static void launch_claude_with_context(void) {
+    if (g_claude_pid <= 0 || !g_claude_session_id[0]) return;
+
+    char *last_conv  = read_last_exchanges(g_claude_session_id, g_claude_cwd, 3);
+    char *sess_notes = find_session_notes(g_claude_session_id);
+    char *marks_part = (g_tui.mark_count > 0) ? build_marked_files_prompt(false) : NULL;
+
+    /* Build combined prompt */
+    size_t bufsz = 512
+        + (marks_part  ? strlen(marks_part)  : 0)
+        + (sess_notes  ? strlen(sess_notes)  : 0)
+        + (last_conv   ? strlen(last_conv)   : 0);
+    char *prompt = malloc(bufsz);
+    if (!prompt) {
+        free(last_conv); free(sess_notes); free(marks_part);
+        return;
+    }
+
+    size_t pos = 0;
+
+    if (marks_part) {
+        pos += snprintf(prompt + pos, bufsz - pos, "%s\n\n", marks_part);
+    }
+
+    if (sess_notes) {
+        pos += snprintf(prompt + pos, bufsz - pos,
+            "## Session Notes\n\n"
+            "The following notes were created during the previous session.\n"
+            "Use the Read tool to load them when the conversation touches related topics.\n\n"
+            "%s\n", sess_notes);
+    }
+
+    if (last_conv) {
+        pos += snprintf(prompt + pos, bufsz - pos,
+            "## Last Conversation\n\n"
+            "The previous session ended here:\n\n"
+            "%s", last_conv);
+    }
+
+    free(last_conv); free(sess_notes); free(marks_part);
+
+    if (pos == 0) { free(prompt); return; }
+
+    kill_stopped_claude();
+    mdkb_tui_cleanup();
+
+    char new_session_id[64] = "";
+    FILE *fuuid = fopen("/proc/sys/kernel/random/uuid", "r");
+    if (fuuid) {
+        if (fgets(new_session_id, sizeof(new_session_id), fuuid))
+            new_session_id[strcspn(new_session_id, "\n")] = '\0';
+        fclose(fuuid);
+    }
+    snprintf(g_claude_session_id, sizeof(g_claude_session_id), "%s", new_session_id);
+    snprintf(g_claude_cwd, sizeof(g_claude_cwd), "%s",
+             g_claude_cwd[0] ? g_claude_cwd : ".");
+
+    const char *argv[] = {"claude", "--model", "sonnet", "--permission-mode", "auto",
+                          "--session-id", new_session_id,
+                          "--append-system-prompt", prompt, NULL};
+    int rc = run_child(argv, g_claude_cwd[0] ? g_claude_cwd : NULL);
+    free(prompt);
+
+    if (rc == 1)
+        snapshot_loaded_marks();
+    else {
+        memset(g_tui.marked, 0, g_tui.index->entry_capacity * sizeof(bool));
+        g_tui.mark_count = 0;
+        clear_loaded_marks();
+    }
+    restore_after_claude(rc != 1);
+}
+
 /* Launch Claude Code with multiple knowledge files as on-demand references.
  * Builds a prompt listing file paths + titles, passed via --append-system-prompt.
  * Pre-generates a session UUID so launch_claude_continue() can --resume it later. */
@@ -3975,6 +4257,7 @@ static void launch_claude_multi(void) {
             g_claude_session_id[strcspn(g_claude_session_id, "\n")] = '\0';
         fclose(fuuid);
     }
+    getcwd(g_claude_cwd, sizeof(g_claude_cwd));
 
     mdkb_tui_cleanup();
 
@@ -4744,6 +5027,13 @@ static void handle_key(int key) {
             break;
         }
 
+        case 'C':
+            /* Fresh session carrying context from the suspended session */
+            if (g_claude_pid > 0) {
+                launch_claude_with_context();
+                refresh_display();
+            }
+            break;
         case 'R':
             /* Resume paused Claude Code */
             if (g_claude_pid > 0) {
